@@ -1,0 +1,266 @@
+name: Organize code
+
+# Drop a .zip into incoming/ (or run manually) -> unzip, place files correctly, fix names,
+# remove duplicates, commit, delete the zip. Completely independent of the APK build.
+on:
+  push:
+    paths:
+      - "incoming/*.zip"
+  workflow_dispatch:
+    inputs:
+      archive:
+        description: "Optional: path of a zip in the repo (leave empty to only clean existing files)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: organize-code
+  cancel-in-progress: false
+
+jobs:
+  organize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write organizer script
+        run: |
+          cat > "$RUNNER_TEMP/organize.py" <<'PYEOF'
+          #!/usr/bin/env python3
+          """Unzip archives, place files correctly, fix bad names, remove duplicates.
+          usage: organize.py <repo_root> <archive.zip> [<archive.zip> ...]
+          Never raises on a single bad file: problems are reported and the run continues."""
+          import hashlib, re, shutil, sys, tempfile, zipfile
+          from pathlib import Path
+
+          JUNK = {".DS_Store", "Thumbs.db", "desktop.ini"}
+          KNOWN_ROOTS = {"app", "gradle", ".github", "src"}
+          ROOT_FILES = {"settings.gradle.kts", "settings.gradle", "gradle.properties", "README.md", ".gitignore",
+                        "gradlew", "gradlew.bat", "LICENSE", "build.gradle.kts", "build.gradle"}
+          COPY_SUFFIX = re.compile(r"(?:\s*\(\d+\)|\s*-\s*copy(?:\s*\(\d+\))?|[\s_-]+copy(?:[\s_-]*\d+)?)$", re.I)
+          COPY_PREFIX = re.compile(r"^(?:copy of |copy_of_)", re.I)
+          DECL = re.compile(r"^\s*(?:public\s+|internal\s+|private\s+|abstract\s+|open\s+|sealed\s+|data\s+|enum\s+|final\s+)*"
+                            r"(?:class|object|interface)\s+([A-Za-z_]\w*)", re.M)
+          log = {"placed": [], "renamed": [], "dupes": [], "kept": [], "skipped": [], "errors": []}
+
+
+          def strip_copy_markers(stem: str) -> str:
+              stem = COPY_PREFIX.sub("", stem)
+              prev = None
+              while prev != stem:
+                  prev, stem = stem, COPY_SUFFIX.sub("", stem).strip()
+              return stem or "file"
+
+
+          def clean_name(path: Path, text: str = "") -> str:
+              """Corrected file name for `path`; `text` is the file content (used for Kotlin/Java class names)."""
+              ext = path.suffix
+              stem = strip_copy_markers(path.name[: len(path.name) - len(ext)] if ext else path.name)
+              if "res" in path.parts:
+                  stem = re.sub(r"[^a-z0-9_]+", "_", stem.lower()).strip("_") or "res"
+                  if stem[0].isdigit():
+                      stem = "f_" + stem
+                  return stem + ext.lower()
+              if ext.lower() in {".kt", ".java"}:
+                  names = DECL.findall(text)
+                  if names and (re.sub(r"[^a-z0-9]", "", stem.lower()) == names[0].lower()
+                                or (len(names) == 1 and ext.lower() == ".java")):
+                      stem = names[0]
+                  stem = re.sub(r"[^A-Za-z0-9_]", "", stem) or "File"
+                  if ext.lower() == ".kt" and stem[0].islower() and len(names) == 1:
+                      stem = stem[0].upper() + stem[1:]
+                  return stem + ext.lower()
+              return re.sub(r"\s+", "_", stem) + ext
+
+
+          def sha(p: Path) -> str:
+              return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+          def safe_extract(zf, dest: Path):
+              base = dest.resolve()
+              for i in zf.infolist():
+                  if not str((dest / i.filename).resolve()).startswith(str(base)):
+                      raise ValueError(f"unsafe path in zip: {i.filename}")
+              zf.extractall(dest)
+
+
+          def strip_wrappers(root: Path) -> Path:
+              while True:
+                  entries = [e for e in root.iterdir() if e.name != "__MACOSX" and e.name not in JUNK]
+                  if len(entries) == 1 and entries[0].is_dir() and entries[0].name not in KNOWN_ROOTS:
+                      root = entries[0]
+                  else:
+                      return root
+
+
+          def xml_kind(text: str) -> str:
+              m = re.search(r"<\s*([A-Za-z][\w.\-]*)", re.sub(r"<\?xml.*?\?>|<!--.*?-->", "", text, flags=re.S))
+              tag = m.group(1) if m else ""
+              return {"manifest": "manifest", "resources": "values", "adaptive-icon": "mipmap-anydpi-v26",
+                      "data-extraction-rules": "xml", "full-backup-content": "xml", "network-security-config": "xml",
+                      "paths": "xml", "menu": "menu"}.get(tag, "drawable" if tag in {
+                          "vector", "shape", "selector", "layer-list", "ripple", "animated-vector", "bitmap", "inset"} else "layout")
+
+
+          def values_name(t: str) -> str:
+              for key, name in (("<style", "themes.xml"), ("<color", "colors.xml"), ("<string", "strings.xml"), ("<dimen", "dimens.xml")):
+                  if key in t:
+                      return name
+              return "values.xml"
+
+
+          def route_loose(p: Path, rel: Path):
+              name, ext = rel.name, rel.suffix.lower()
+              main = Path("app/src/main")
+              if name in ROOT_FILES:
+                  return Path(name)
+              if ext in {".kt", ".java"}:
+                  t = p.read_text(errors="ignore")
+                  m = re.search(r"^\s*package\s+([\w.]+)", t, flags=re.M)
+                  pkg = Path(*m.group(1).split(".")) if m else Path()
+                  test = "org.junit" in t or re.search(r"Test\.(kt|java)$", name)
+                  return (Path("app/src/test/java") if test else main / "java") / pkg / name
+              if ext == ".xml":
+                  t = p.read_text(errors="ignore")
+                  k = xml_kind(t)
+                  if k == "manifest":
+                      return main / "AndroidManifest.xml"
+                  if k == "values":
+                      return main / "res/values" / (name if name in {"strings.xml", "colors.xml", "themes.xml", "dimens.xml"} else values_name(t))
+                  return main / "res" / k / name
+              if ext in {".png", ".webp", ".jpg", ".jpeg"}:
+                  return main / "res" / ("mipmap-xxhdpi" if name.lower().startswith("ic_launcher") else "drawable") / name
+              if ext in {".ttf", ".otf"}:
+                  return main / "res/font" / name
+              if ext == ".pro":
+                  return Path("app/proguard-rules.pro")
+              if ext in {".kts", ".gradle"}:
+                  t = p.read_text(errors="ignore")
+                  return Path("app/build.gradle.kts") if "namespace" in t or "android {" in t else Path(name)
+              return None
+
+
+          def place(root: Path, repo: Path):
+              for p in sorted(root.rglob("*")):
+                  try:
+                      if not p.is_file() or "__MACOSX" in p.parts or p.name in JUNK:
+                          continue
+                      rel = p.relative_to(root)
+                      keep = (len(rel.parts) > 1 and rel.parts[0] in KNOWN_ROOTS) or (len(rel.parts) == 1 and rel.name in ROOT_FILES)
+                      dest = rel if keep else route_loose(p, rel)
+                      if dest is None:
+                          log["skipped"].append(f"`{rel}`: unknown file type")
+                          continue
+                      if dest.parts[0] == ".github":
+                          log["skipped"].append(f"`{rel}`: workflow files cannot be pushed by the Actions token")
+                          continue
+                      fixed = dest.with_name(clean_name(dest, p.read_text(errors="ignore") if p.suffix in {".kt", ".java"} else ""))
+                      if fixed.name != dest.name:
+                          log["renamed"].append(f"`{dest.name}` → `{fixed.name}`")
+                      out = repo / fixed
+                      if out.exists() and sha(out) == sha(p):
+                          log["dupes"].append(f"`{fixed}` (already identical, upload ignored)")
+                          continue
+                      out.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.copy2(p, out)
+                      log["placed"].append(f"`{rel}` → `{fixed}`")
+                  except Exception as e:  # keep going on any single-file problem
+                      log["errors"].append(f"`{p.name}`: {e}")
+
+
+          def sweep(repo: Path):
+              """Fix copy-style names and delete duplicate source files under app/src."""
+              src = repo / "app" / "src"
+              if not src.is_dir():
+                  return
+              files = [p for p in src.rglob("*") if p.is_file() and p.name not in JUNK]
+              # 1) rename copy-style names
+              for p in list(files):
+                  want = clean_name(p.relative_to(repo), p.read_text(errors="ignore") if p.suffix in {".kt", ".java"} else "")
+                  if want != p.name:
+                      target = p.with_name(want)
+                      if target.exists():
+                          if sha(target) == sha(p):
+                              p.unlink(); files.remove(p)
+                              log["dupes"].append(f"`{p.relative_to(repo)}` (identical to `{want}`)")
+                          else:
+                              log["kept"].append(f"`{p.relative_to(repo)}` differs from `{want}`; both kept, please review")
+                      else:
+                          p.rename(target)
+                          files[files.index(p)] = target
+                          log["renamed"].append(f"`{p.relative_to(repo)}` → `{want}`")
+              # 2) code duplicates: same name + same content anywhere; keep the copy in the folder matching its package
+              groups = {}
+              for p in files:
+                  if p.exists() and p.suffix in {".kt", ".java"}:
+                      groups.setdefault((p.name, sha(p)), []).append(p)
+              for paths in groups.values():
+                  if len(paths) < 2:
+                      continue
+                  def good(p):
+                      m = re.search(r"^\s*package\s+([\w.]+)", p.read_text(errors="ignore"), flags=re.M)
+                      return 0 if m and str(p.parent).replace("\\", "/").endswith(m.group(1).replace(".", "/")) else 1
+                  paths.sort(key=lambda p: (good(p), len(p.parts), str(p)))
+                  for extra in paths[1:]:
+                      extra.unlink()
+                      log["dupes"].append(f"`{extra.relative_to(repo)}` (duplicate of `{paths[0].relative_to(repo)}`)")
+              # 3) identical resources with the same name inside one folder cannot exist; remove empty dirs
+              for d in sorted((x for x in src.rglob("*") if x.is_dir()), key=lambda x: -len(x.parts)):
+                  if not any(d.iterdir()):
+                      d.rmdir()
+
+
+          def main():
+              repo = Path(sys.argv[1]).resolve()
+              for a in sys.argv[2:]:
+                  try:
+                      tmp = Path(tempfile.mkdtemp())
+                      with zipfile.ZipFile(a) as zf:
+                          safe_extract(zf, tmp)
+                      place(strip_wrappers(tmp), repo)
+                      shutil.rmtree(tmp, ignore_errors=True)
+                  except Exception as e:
+                      log["errors"].append(f"`{a}`: {e}")
+              try:
+                  sweep(repo)
+              except Exception as e:
+                  log["errors"].append(f"cleanup: {e}")
+              out = ["### Organize report"]
+              for title, key in (("Placed", "placed"), ("Names fixed", "renamed"), ("Duplicates removed", "dupes"),
+                                 ("Needs review", "kept"), ("Skipped", "skipped"), ("Errors", "errors")):
+                  if log[key]:
+                      out += ["", f"**{title}** ({len(log[key])})"] + [f"- {x}" for x in log[key]]
+              if len(out) == 1:
+                  out.append("\nNothing to do.")
+              print("\n".join(out))
+
+
+          if __name__ == "__main__":
+              main()
+          PYEOF
+
+      - name: Unzip, organize, fix names, remove duplicates
+        run: |
+          shopt -s nullglob
+          zips=(incoming/*.zip)
+          if [ -n "${{ inputs.archive }}" ] && [ -f "${{ inputs.archive }}" ]; then zips+=("${{ inputs.archive }}"); fi
+          python3 "$RUNNER_TEMP/organize.py" "$GITHUB_WORKSPACE" "${zips[@]}" | tee "$RUNNER_TEMP/report.md"
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+          for z in "${zips[@]}"; do git rm -q --ignore-unmatch "$z" || true; rm -f "$z"; done
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+          else
+            git commit -m "Organize uploaded code"
+            git pull --rebase origin "${{ github.ref_name }}"
+            git push
+          fi
