@@ -1,11 +1,12 @@
 name: Organize code
 
-# Drop a .zip into incoming/ (or run manually) -> unzip, place files correctly, fix names,
+# Push a .zip anywhere in the repo (or run manually) -> unzip, place files correctly, fix names,
 # remove duplicates, commit, delete the zip. Completely independent of the APK build.
 on:
   push:
     paths:
-      - "incoming/*.zip"
+      - "*.zip"
+      - "**/*.zip"
   workflow_dispatch:
     inputs:
       archive:
@@ -208,7 +209,7 @@ jobs:
                   for extra in paths[1:]:
                       extra.unlink()
                       log["dupes"].append(f"`{extra.relative_to(repo)}` (duplicate of `{paths[0].relative_to(repo)}`)")
-              # 3) identical resources with the same name inside one folder cannot exist; remove empty dirs
+              # 3) remove empty dirs
               for d in sorted((x for x in src.rglob("*") if x.is_dir()), key=lambda x: -len(x.parts)):
                   if not any(d.iterdir()):
                       d.rmdir()
@@ -245,8 +246,7 @@ jobs:
 
       - name: Unzip, organize, fix names, remove duplicates
         run: |
-          shopt -s nullglob
-          zips=(incoming/*.zip)
+          mapfile -t zips < <(find . -name '*.zip' -not -path './.git/*' -not -path '*/build/*' -not -path './node_modules/*' | sed 's|^\./||')
           if [ -n "${{ inputs.archive }}" ] && [ -f "${{ inputs.archive }}" ]; then zips+=("${{ inputs.archive }}"); fi
           python3 "$RUNNER_TEMP/organize.py" "$GITHUB_WORKSPACE" "${zips[@]}" | tee "$RUNNER_TEMP/report.md"
           cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
