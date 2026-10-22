@@ -1,0 +1,210 @@
+name: Organize code and build APK
+
+# One workflow: drop a .zip into incoming/ (or run manually) -> it is unzipped, every file is placed
+# where Android/Gradle expects it, the result is committed, the zip is deleted, and the APK is built.
+# Without a zip it simply builds the app on every push.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      archive:
+        description: "Optional: path of a zip in the repo to unpack first"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: organize-and-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  organize-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write organizer script
+        run: |
+          cat > "$RUNNER_TEMP/organize.py" <<'PYEOF'
+          #!/usr/bin/env python3
+          """Unzip an archive and place its files in the right spots of an Android (Kotlin/Compose) project.
+
+          usage: organize.py <archive.zip> <repo_root>
+          """
+          import os, re, shutil, sys, tempfile, zipfile
+          from pathlib import Path
+
+          JUNK = {".DS_Store", "Thumbs.db"}
+          KNOWN_ROOTS = {"app", "gradle", ".github", "src"}
+          ROOT_FILES = {"settings.gradle.kts", "settings.gradle", "gradle.properties", "README.md",
+                        ".gitignore", "gradlew", "gradlew.bat", "local.properties", "LICENSE"}
+          VALUES_ROOT = re.compile(r"<\s*resources[\s>]")
+
+
+          def safe_extract(zf: zipfile.ZipFile, dest: Path):
+              for info in zf.infolist():
+                  target = (dest / info.filename).resolve()
+                  if not str(target).startswith(str(dest.resolve())):
+                      raise SystemExit(f"unsafe path in zip: {info.filename}")
+              zf.extractall(dest)
+
+
+          def strip_wrappers(root: Path) -> Path:
+              """Descend through single wrapper folders such as 'project-main/'."""
+              while True:
+                  entries = [e for e in root.iterdir() if e.name != "__MACOSX" and e.name not in JUNK]
+                  if len(entries) == 1 and entries[0].is_dir() and entries[0].name not in KNOWN_ROOTS:
+                      root = entries[0]
+                  else:
+                      return root
+
+
+          def xml_kind(text: str) -> str:
+              m = re.search(r"<\s*([A-Za-z][\w.\-]*)", re.sub(r"<\?xml.*?\?>|<!--.*?-->", "", text, flags=re.S))
+              tag = m.group(1) if m else ""
+              if tag == "manifest":
+                  return "manifest"
+              if tag == "resources":
+                  return "values"
+              if tag == "adaptive-icon":
+                  return "mipmap-anydpi-v26"
+              if tag in {"vector", "shape", "selector", "layer-list", "ripple", "animated-vector", "bitmap", "inset"}:
+                  return "drawable"
+              if tag in {"data-extraction-rules", "full-backup-content", "network-security-config", "paths", "locale-config"}:
+                  return "xml"
+              if tag in {"menu"}:
+                  return "menu"
+              return "layout"
+
+
+          def values_name(text: str) -> str:
+              if "<style" in text:
+                  return "themes.xml"
+              if "<color" in text:
+                  return "colors.xml"
+              if "<string" in text:
+                  return "strings.xml"
+              if "<dimen" in text:
+                  return "dimens.xml"
+              return "values.xml"
+
+
+          def route_loose(path: Path, rel: Path):
+              """Return the destination (relative to repo root) for a file that is not already in a known folder."""
+              name, ext = rel.name, rel.suffix.lower()
+              main = Path("app/src/main")
+              if name in ROOT_FILES:
+                  return Path(name)
+              if ext in {".kt", ".java"}:
+                  text = path.read_text(errors="ignore")
+                  m = re.search(r"^\s*package\s+([\w.]+)", text, flags=re.M)
+                  pkg = Path(*m.group(1).split(".")) if m else Path()
+                  is_test = name.endswith("Test.kt") or name.endswith("Test.java") or "org.junit" in text
+                  return (Path("app/src/test/java") if is_test else main / "java") / pkg / name
+              if ext == ".xml":
+                  text = path.read_text(errors="ignore")
+                  kind = xml_kind(text)
+                  if kind == "manifest":
+                      return main / "AndroidManifest.xml"
+                  if kind == "values":
+                      return main / "res/values" / (name if name in {"strings.xml", "colors.xml", "themes.xml", "dimens.xml"} else values_name(text))
+                  return main / "res" / kind / name
+              if ext in {".png", ".webp", ".jpg", ".jpeg"}:
+                  return main / "res" / ("mipmap-xxhdpi" if name.startswith("ic_launcher") else "drawable") / name.lower()
+              if ext in {".ttf", ".otf"}:
+                  return main / "res/font" / re.sub(r"[^a-z0-9_.]", "_", name.lower())
+              if ext == ".pro":
+                  return Path("app") / "proguard-rules.pro"
+              if ext in {".kts", ".gradle"}:
+                  text = path.read_text(errors="ignore")
+                  return Path("app/build.gradle.kts") if "namespace" in text or "android {" in text else Path(name)
+              if ext in {".yml", ".yaml"}:
+                  return Path(".github/workflows") / name
+              return None
+
+
+          def main():
+              archive, repo = Path(sys.argv[1]), Path(sys.argv[2]).resolve()
+              tmp = Path(tempfile.mkdtemp())
+              with zipfile.ZipFile(archive) as zf:
+                  safe_extract(zf, tmp)
+              root = strip_wrappers(tmp)
+
+              moved, skipped = [], []
+              for p in sorted(root.rglob("*")):
+                  if not p.is_file() or "__MACOSX" in p.parts or p.name in JUNK:
+                      continue
+                  rel = p.relative_to(root)
+                  top = rel.parts[0]
+                  in_structure = len(rel.parts) > 1 and top in KNOWN_ROOTS or (len(rel.parts) == 1 and rel.name in ROOT_FILES)
+                  dest = rel if in_structure else route_loose(p, rel)
+                  if dest is None:
+                      skipped.append((str(rel), "unknown file type"))
+                      continue
+                  if dest.parts[0] == ".github":
+                      skipped.append((str(rel), "workflow files cannot be pushed by the Actions token; add them manually"))
+                      continue
+                  out = repo / dest
+                  out.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(p, out)
+                  moved.append((str(rel), str(dest)))
+
+              shutil.rmtree(tmp, ignore_errors=True)
+              lines = [f"### Organized {len(moved)} file(s) from `{archive.name}`", "", "| From | To |", "|---|---|"]
+              lines += [f"| `{a}` | `{b}` |" for a, b in moved if a != b] or ["| (all files were already in place) | |"]
+              same = sum(1 for a, b in moved if a == b)
+              lines.append(f"\n{same} file(s) kept their existing paths.")
+              if skipped:
+                  lines += ["", "**Skipped**", ""] + [f"- `{a}`: {why}" for a, why in skipped]
+              print("\n".join(lines))
+
+
+          if __name__ == "__main__":
+              main()
+          PYEOF
+
+      - name: Unzip and organize
+        id: organize
+        run: |
+          shopt -s nullglob
+          files=(incoming/*.zip)
+          if [ -n "${{ inputs.archive }}" ]; then files+=("${{ inputs.archive }}"); fi
+          : > "$RUNNER_TEMP/report.md"
+          for z in "${files[@]}"; do
+            [ -f "$z" ] || { echo "missing: $z"; continue; }
+            python3 "$RUNNER_TEMP/organize.py" "$z" "$GITHUB_WORKSPACE" | tee -a "$RUNNER_TEMP/report.md"
+            git rm -q --ignore-unmatch "$z"
+            rm -f "$z"
+          done
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+          git add -A
+          if git diff --cached --quiet; then echo "changed=false" >> "$GITHUB_OUTPUT"; else echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Commit organized files
+        if: steps.organize.outputs.changed == 'true' && github.event_name != 'pull_request'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Organize uploaded code [skip ci]"
+          git push
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Unit tests and debug APK
+        run: gradle --no-daemon testDebugUnitTest assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chess-lab-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
