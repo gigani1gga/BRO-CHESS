@@ -30,15 +30,19 @@ class GameBuf {
 class Engine(seed: Long = System.nanoTime()) {
 
     @JvmField val b = IntArray(64)
-    private val ks = IntArray(2)             // king squares: [white, black]
+    @JvmField internal val ks = IntArray(2)  // king squares: [white, black]
     var side = 1
         private set
-    private var cs = 15
-    private var ep = -1
-    private var hm = 0
+    internal var cs = 15
+    internal var ep = -1
+    internal var hm = 0
     private var sp = 0
 
-    private val us = IntArray(64)            // undo stack, 7 ints per ply
+    /** 64-bit hashes of every position played with [apply] (used for repetition detection in search). */
+    @JvmField internal val rep = LongArray(1024)
+    @JvmField internal var repN = 0
+
+    private val us = IntArray(7 * 320)       // undo stack, 7 ints per ply
     private val m1 = IntArray(512)
     private val m2 = IntArray(512)
     private val lm = IntArray(512)
@@ -75,6 +79,7 @@ class Engine(seed: Long = System.nanoTime()) {
         }
         side = 1; cs = 15; ep = -1; hm = 0; sp = 0
         ks[0] = 60; ks[1] = 4
+        repN = 0; pushRep()
     }
 
     fun setFen(fen: String) {
@@ -90,13 +95,15 @@ class Engine(seed: Long = System.nanoTime()) {
             if (k == 6) ks[if (white) 0 else 1] = i
             i++
         }
-        side = if (parts[1] == "w") 1 else -1
-        val c = parts[2]
+        side = if (parts.getOrElse(1) { "w" } == "w") 1 else -1
+        val c = parts.getOrElse(2) { "-" }
         cs = (if ('K' in c) 1 else 0) or (if ('Q' in c) 2 else 0) or
             (if ('k' in c) 4 else 0) or (if ('q' in c) 8 else 0)
         ep = if (parts.size > 3 && parts[3] != "-")
             "abcdefgh".indexOf(parts[3][0]) + (8 - (parts[3][1] - '0')) * 8 else -1
-        hm = 0; sp = 0
+        hm = parts.getOrNull(4)?.toIntOrNull() ?: 0
+        sp = 0
+        repN = 0; pushRep()
     }
 
     fun fen(): String {
@@ -130,7 +137,7 @@ class Engine(seed: Long = System.nanoTime()) {
 
     // ------------------------------------------------------------------ attacks
 
-    private fun att(sq: Int, by: Int): Boolean {
+    internal fun att(sq: Int, by: Int): Boolean {
         for (t in KN[sq]) if (b[t] == 2 * by) return true
         for (t in KI[sq]) if (b[t] == 6 * by) return true
         val r = sq shr 3
@@ -158,7 +165,7 @@ class Engine(seed: Long = System.nanoTime()) {
 
     // ------------------------------------------------------------------ move generation (pseudo-legal)
 
-    private fun gen(buf: IntArray): Int {
+    internal fun gen(buf: IntArray): Int {
         var n = 0
         val s = side
         for (sq in 0 until 64) {
@@ -226,7 +233,7 @@ class Engine(seed: Long = System.nanoTime()) {
 
     // ------------------------------------------------------------------ make / unmake
 
-    private fun make(m: Int) {
+    internal fun make(m: Int) {
         val f = m and 63
         val t = (m shr 6) and 63
         val pr = (m shr 12) and 7
@@ -250,7 +257,7 @@ class Engine(seed: Long = System.nanoTime()) {
         side = -side
     }
 
-    private fun unmake(m: Int) {
+    internal fun unmake(m: Int) {
         val f = m and 63
         val t = (m shr 6) and 63
         val fl = m shr 15
@@ -272,6 +279,39 @@ class Engine(seed: Long = System.nanoTime()) {
     fun apply(m: Int) {
         make(m)
         sp -= 7
+        pushRep()
+    }
+
+    /** Square of the king of colour [s] (1 white, -1 black). */
+    internal fun kingSq(s: Int): Int = ks[if (s == 1) 0 else 1]
+
+    /** 64-bit Zobrist-style key of the current position (pieces, side, castling, en passant file). */
+    internal fun hash64(): Long {
+        var h = if (side == 1) 0L else Tables.Z64[832]
+        h = h xor Tables.Z64[833 + cs]
+        if (ep >= 0) h = h xor Tables.Z64[849 + (ep and 7)]
+        for (q in 0 until 64) {
+            val p = b[q]
+            if (p != 0) h = h xor Tables.Z64[(p + 6) * 64 + q]
+        }
+        return h
+    }
+
+    private fun pushRep() {
+        if (repN == rep.size) {
+            System.arraycopy(rep, rep.size / 2, rep, 0, rep.size / 2)
+            repN = rep.size / 2
+        }
+        rep[repN++] = hash64()
+    }
+
+    /** Copies the full game state (position, rights, repetition history) from [o]. */
+    fun copyFrom(o: Engine) {
+        System.arraycopy(o.b, 0, b, 0, 64)
+        ks[0] = o.ks[0]; ks[1] = o.ks[1]
+        side = o.side; cs = o.cs; ep = o.ep; hm = o.hm; sp = 0
+        System.arraycopy(o.rep, 0, rep, 0, o.repN)
+        repN = o.repN
     }
 
     private fun hasLegal(): Boolean {

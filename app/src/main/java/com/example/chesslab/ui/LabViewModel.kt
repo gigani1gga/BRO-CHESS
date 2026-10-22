@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.chesslab.engine.Engine
+import com.example.chesslab.engine.Searcher
 import com.example.chesslab.train.GameKind
 import com.example.chesslab.train.GameRecord
 import com.example.chesslab.train.SelfPlayTrainer
@@ -26,7 +27,8 @@ data class LabUi(
     val turbo: Boolean = false,
     val kind: GameKind = GameKind.LAST,
     val playing: Boolean = false,
-    val promo: List<PromoChoice> = emptyList()
+    val promo: List<PromoChoice> = emptyList(),
+    val level: Int = 1
 )
 
 class LabViewModel(app: Application) : AndroidViewModel(app) {
@@ -34,6 +36,11 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
     private val store = WeightStore(app.filesDir)
     private val trainer: SelfPlayTrainer
     private val core = Engine()
+    private val brain = Engine()                 // private copy of the game used for thinking off the UI thread
+    private val searcher = Searcher(brain, 19)
+    private val searchLock = Any()
+    private var playWeights: DoubleArray? = null
+    private var appliedWeights: DoubleArray? = null   // only touched while holding searchLock
     private val hist = ArrayList<Int>()
 
     private val _ui = MutableStateFlow(LabUi())
@@ -164,9 +171,15 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------------------------------------------------------------- play against the engine
 
+    fun setLevel(l: Int) {
+        _ui.update { it.copy(level = l.coerceIn(0, LEVEL_MS.size - 1)) }
+    }
+
     fun startPlay(white: Boolean) {
         human = if (white) 1 else -1
         gameId++
+        searcher.abort()
+        playWeights = trainer.strongest().second
         core.reset()
         hist.clear()
         selected = -1
@@ -180,6 +193,7 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
 
     fun stopPlay() {
         gameId++
+        searcher.abort()
         busy = false
         replay = null
         replayWait = 3
@@ -207,11 +221,21 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
             busy = true
             setCaption(check + "Engine $label is thinking…")
             val id = gameId
+            val lvl = _ui.value.level
+            val weights = playWeights
             viewModelScope.launch {
-                delay(350)
+                delay(250)
                 if (id != gameId || !_ui.value.playing) return@launch
-                val w = withContext(Dispatchers.Default) { trainer.strongest().second }
-                val m = core.ai(w, 0.0)
+                val m = withContext(Dispatchers.Default) {
+                    synchronized(searchLock) {
+                        if (id != gameId) -1 else {
+                            brain.copyFrom(core)
+                            if (weights !== appliedWeights) { searcher.setWeights(weights); appliedWeights = weights }
+                            searcher.best(LEVEL_MS[lvl], LEVEL_DEPTH[lvl]).move
+                        }
+                    }
+                }
+                if (id != gameId || !_ui.value.playing) return@launch
                 busy = false
                 if (m >= 0) doMove(m)
             }
@@ -276,4 +300,9 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun setCaption(c: String) = _ui.update { it.copy(caption = c) }
+
+    private companion object {
+        val LEVEL_MS = longArrayOf(250L, 1200L, 3500L)
+        val LEVEL_DEPTH = intArrayOf(3, 8, 24)
+    }
 }

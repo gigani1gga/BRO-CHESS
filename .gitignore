@@ -5,5 +5,3 @@ local.properties
 *.iml
 .DS_Store
 .kotlin/
-*.keystore
-*.jks

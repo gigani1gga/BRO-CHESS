@@ -77,6 +77,14 @@ fun LabScreen(vm: LabViewModel, padding: PaddingValues) {
         }
         item {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Engine strength:", style = MaterialTheme.typography.labelLarge)
+                FilterChip(ui.level == 0, { vm.setLevel(0) }, { Text("Easy") })
+                FilterChip(ui.level == 1, { vm.setLevel(1) }, { Text("Medium") })
+                FilterChip(ui.level == 2, { vm.setLevel(2) }, { Text("Hard") })
+            }
+        }
+        item {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(ui.kind == GameKind.LAST, { vm.selectKind(GameKind.LAST) }, { Text("Latest") })
                 FilterChip(ui.kind == GameKind.BEST, { vm.selectKind(GameKind.BEST) }, { Text("Fastest mate") })
                 FilterChip(ui.kind == GameKind.WORST, { vm.selectKind(GameKind.WORST) }, { Text("Longest game") })

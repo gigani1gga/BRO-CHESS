@@ -77,6 +77,13 @@ object Tables {
         for (i in z.indices) z[i] = rnd.nextInt()
     }
 
+    /** 64-bit keys: [0,832) piece/square, 832 side, 833..848 castling rights, 849..856 en-passant file. */
+    @JvmField
+    val Z64 = LongArray(870).also { z ->
+        val rnd = java.util.Random(0x2545F4914F6CDD1DL)
+        for (i in z.indices) z[i] = rnd.nextLong()
+    }
+
     /** Trigger masks for "could this move give a direct check": indexed by piece type. */
     @JvmField
     val TM = intArrayOf(0, 1, 2, 4, 8, 12, 0)

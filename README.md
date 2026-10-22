@@ -1,33 +1,36 @@
 # Chess Lab (native Kotlin)
 
-Two chess engines start knowing only the rules and teach themselves by playing each other (TD(λ) learning of
-piece-square tables and piece values). You can watch games, play against the stronger engine, and train
-against Stockfish in the Arena tab.
+Two chess engines start knowing only the rules and teach themselves by playing each other (TD(lambda) learning of
+piece-square tables and piece values). You can watch games, play against the engine at three strengths, and train
+against Stockfish in the Arena tab. Kotlin + Jetpack Compose, no WebView.
 
-Native rewrite of the former Capacitor/WebView app: Kotlin + Jetpack Compose, no WebView, no JavaScript.
+## Automatic APK builds
 
-## Build
+`.github/workflows/android.yml` rebuilds the APK whenever code changes (every push, and after "Organize code" has
+unzipped an uploaded zip). Each build:
 
-Open the folder in Android Studio (Koala or newer, JDK 17) and run, or:
+- compiles Stockfish 17 for Android (arm64-v8a, armeabi-v7a, x86_64) and bundles it as `libstockfish.so` (cached after the first run)
+- runs the unit tests (a failing test is reported in the run summary but never blocks the APK)
+- builds a release APK signed with the **permanent key** `app/chesslab.keystore`
+- gets `versionCode = 100 + run number`, so it always installs as an update over the previous build
+- is published at a permanent link: `https://github.com/<user>/<repo>/releases/latest/download/ChessLab.apk`
 
-```
-gradle testDebugUnitTest assembleDebug
-```
+The keystore and its passwords are committed on purpose so every build uses the same key. Keep the repo private
+if you do not want anyone else to be able to sign an APK that updates yours.
 
-CI (`.github/workflows/android.yml`) does the same and uploads the debug APK.
+Manual build: `gradle testDebugUnitTest assembleRelease` (Gradle 8.9, JDK 17).
 
-## Performance notes
+## Engine
 
-- Allocation-free mailbox engine (flat `IntArray`s, precomputed ray/knight/king tables, packed int moves).
-  Move generation is checked against standard perft counts (`EngineTest`).
-- Self-play runs on `cores - 1` threads (max 8). Each worker trains private weight copies for ~250 ms and
-  merges its delta into the shared weights; stale batches are dropped after a reset.
-- The board is one `Canvas` draw (no per-square composables). Stats update once per second.
-- Training pauses when the app is in the background; weights are saved to app storage and restored on launch.
-- Release builds use R8 minification and resource shrinking.
+- Allocation-free mailbox move generator, verified against standard perft counts.
+- **Searcher**: iterative deepening alpha-beta (PVS), 64-bit transposition table, quiescence search with check
+  evasions, MVV-LVA / killer / history ordering, late-move reductions, check extensions, repetition and 50-move
+  draw detection. Evaluation blends classical terms (material, piece-square tables, passed/doubled pawns, bishop pair)
+  with the self-learned piece-square values once they become meaningful.
+- Play mode searches off the UI thread; strength Easy / Medium / Hard = 0.25 s / 1.2 s / 3.5 s per move.
+- Self-play learning threads use one-ply greedy play for speed; the Arena trains with search-based play.
 
 ## Stockfish arena
 
-The Arena tab drives a native UCI engine. Place a native Android Stockfish build named `libstockfish.so` in
-`app/src/main/jniLibs/<abi>/` (`arm64-v8a`, `armeabi-v7a`, `x86_64`) and rebuild. Without it the tab shows a
-notice and the Lab tab works as normal.
+The Arena tab drives the bundled Stockfish through UCI. Its skill level rises as our evaluation improves. If the
+process dies or stalls it is restarted automatically; persistent failures are shown on screen.

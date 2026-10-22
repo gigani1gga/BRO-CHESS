@@ -110,8 +110,10 @@ class SelfPlayTrainer(
             synchronized(lock) {
                 if (myEpoch == epoch) {
                     for (i in 0 until NF) {
-                        gA[i] += a[i] - basisA[i]
-                        gB[i] += b[i] - basisB[i]
+                        val xa = gA[i] + a[i] - basisA[i]
+                        val xb = gB[i] + b[i] - basisB[i]
+                        if (xa.isFinite()) gA[i] = Weights.clamp(xa)
+                        if (xb.isFinite()) gB[i] = Weights.clamp(xb)
                     }
                     total += r.games; tA += r.aWins; tB += r.bWins; tM += r.mates
                     val bg = bestG

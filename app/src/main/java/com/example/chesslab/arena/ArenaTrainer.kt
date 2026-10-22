@@ -1,17 +1,21 @@
 package com.example.chesslab.arena
 
 import com.example.chesslab.engine.Engine
+import com.example.chesslab.engine.Searcher
 import com.example.chesslab.engine.Weights
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.tanh
 
 data class ArenaStats(
@@ -26,7 +30,11 @@ data class ArenaStats(
     val note: String = ""
 )
 
-/** Trains one evaluation vector against a native UCI engine whose skill level rises as we get stronger. */
+/**
+ * Trains one evaluation vector against a native UCI engine whose skill level rises as we get stronger.
+ * Our side plays with the alpha-beta [Searcher] on top of the current weights; Stockfish's evaluation
+ * of every position is the learning signal.
+ */
 class ArenaTrainer(
     private val scope: CoroutineScope,
     private val binary: File,
@@ -46,26 +54,25 @@ class ArenaTrainer(
     private var positions = 0L
     private var windowSum = 0; private var windowN = 0
     private var job: Job? = null
+    private val failures = AtomicInteger()
 
     fun weights(): DoubleArray = synchronized(wLock) { w.copyOf() }
 
     fun start() {
         if (job?.isActive == true) return
         running.value = true
+        failures.set(0)
         job = scope.launch(Dispatchers.Default) {
-            val procs = ArrayList<UciProcess>()
             try {
-                repeat(slots) {
-                    val p = UciProcess(binary, this)
-                    p.start()
-                    procs.add(p)
-                }
                 publish("")
-                procs.map { p -> launch { slot(p) } }.joinAll()
+                coroutineScope {
+                    repeat(slots) { launch { slotLoop() } }
+                }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                publish("Engine stopped: ${e.message ?: e.javaClass.simpleName}")
+                publish("Stockfish stopped: ${e.message ?: e.javaClass.simpleName}")
             } finally {
-                procs.forEach { it.close() }
                 running.value = false
             }
         }
@@ -87,14 +94,43 @@ class ArenaTrainer(
         running.value = false
     }
 
-    private suspend fun slot(o: UciProcess) {
+    /** Keeps one Stockfish process alive for this slot, restarting it if it dies or stalls. */
+    private suspend fun slotLoop() {
+        while (scope.isActive && job?.isActive == true) {
+            val o = UciProcess(binary)
+            try {
+                o.start()
+                playGames(o)
+                return
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val n = failures.incrementAndGet()
+                val why = e.message ?: e.javaClass.simpleName
+                if (n >= MAX_FAILURES) {
+                    publish("Stockfish failed repeatedly ($why). If this says permission denied, Android blocked " +
+                        "running the binary; if it says missing, the APK was built without Stockfish.")
+                    return
+                }
+                publish("Stockfish hiccup ($why) - restarting ($n/$MAX_FAILURES)")
+                delay(1000)
+            } finally {
+                o.close()
+            }
+        }
+    }
+
+    private suspend fun playGames(o: UciProcess) {
         val e = Engine()
+        val brain = Searcher(e, 16)
         var applied = -1
         while (scope.isActive && job?.isActive == true) {
             running.first { it }
             val lvl = level
             if (lvl != applied) { o.setOption("Skill Level", lvl); applied = lvl }
+            o.newGame()
             e.reset()
+            brain.setWeights(synchronized(wLock) { w.copyOf() })
             val ours = if (Math.random() < 0.5) 1 else -1
             val hist = ArrayList<Int>()
             val snaps = ArrayList<IntArray>()
@@ -110,7 +146,8 @@ class ArenaTrainer(
                 targets.add(tanh(r.cp / 300.0) * turn)
                 val m = when {
                     ply < 4 -> e.randomLegalMove()
-                    turn == ours -> synchronized(wLock) { e.ai(w, 0.03) }
+                    turn == ours ->
+                        if (Math.random() < 0.04) e.randomLegalMove() else brain.best(OUR_MS, OUR_DEPTH).move
                     else -> fromUci(e, r.bestMove)
                 }
                 if (m < 0) break
@@ -124,6 +161,7 @@ class ArenaTrainer(
             val tg = targets.toDoubleArray()
             val er = synchronized(wLock) { e.trainSupervised(w, bs, n, tg, LR) }
             val score = win * ours
+            failures.set(0)
             synchronized(this) {
                 games++
                 positions += n
@@ -160,6 +198,9 @@ class ArenaTrainer(
     private companion object {
         const val MAX_PLY = 160
         const val MOVE_MS = 30
+        const val OUR_MS = 40L
+        const val OUR_DEPTH = 5
         const val LR = 0.003
+        const val MAX_FAILURES = 5
     }
 }

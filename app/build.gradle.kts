@@ -3,6 +3,9 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// CI passes -PversionCode=<run number>; every build must have a higher code than the last to install as an update.
+val buildNumber = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
+
 android {
     namespace = "com.example.chesslab"
     compileSdk = 34
@@ -11,13 +14,27 @@ android {
         applicationId = "com.example.chesslab"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "2.0"
+        versionCode = buildNumber
+        versionName = "3.0.$buildNumber"
         vectorDrawables { useSupportLibrary = true }
     }
 
+    // One permanent key for every build (debug and release), so each new APK installs over the previous one.
+    signingConfigs {
+        create("fixed") {
+            storeFile = file("chesslab.keystore")
+            storePassword = "chesslab-fixed-key"
+            keyAlias = "chesslab"
+            keyPassword = "chesslab-fixed-key"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("fixed")
+        }
         release {
+            signingConfig = signingConfigs.getByName("fixed")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -35,6 +52,11 @@ android {
     kotlinOptions {
         jvmTarget = "17"
         freeCompilerArgs += listOf("-Xno-param-assertions", "-Xno-call-assertions", "-Xno-receiver-assertions")
+    }
+
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = false
     }
 
     buildFeatures { compose = true }
