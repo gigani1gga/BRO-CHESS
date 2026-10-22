@@ -1,8 +1,12 @@
 name: Organize code
 
+# Unpacks any .zip you push, copies its contents over the repo (overwriting duplicate files),
+# then deletes the zip. The "Build APK" workflow starts automatically afterwards.
 on:
   push:
-  workflow_dispatch:
+    paths:
+      - '**.zip'
+  workflow_dispatch:      # manual run: processes the most recently uploaded zip
 
 permissions:
   contents: write
@@ -16,24 +20,60 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Detect new zips, unzip and organize
+      - name: Unzip and organize
         run: |
-          shopt -s globstar nullglob
-          touch .organized-zips
-          for z in **/*.zip; do
-            case "$z" in */build/*|node_modules/*) continue;; esac
-            h=$(sha256sum "$z" | cut -d' ' -f1)
-            if grep -qx "$h" .organized-zips; then echo "Skip (already done): $z"; continue; fi
-            echo "Processing: $z"
+          set -uo pipefail
+          shopt -s nullglob
+
+          # ---- decide which zips to process
+          zips=()
+          if [ "${{ github.event_name }}" = "push" ]; then
+            before="${{ github.event.before }}"
+            if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+              mapfile -t zips < <(git ls-files '*.zip')
+            else
+              mapfile -t zips < <(git diff --name-only --diff-filter=AM "$before" "${{ github.sha }}" -- '*.zip')
+            fi
+          else
+            newest=""; newest_t=0
+            for z in *.zip; do
+              t=$(git log -1 --format=%ct -- "$z")
+              if [ "${t:-0}" -gt "$newest_t" ]; then newest="$z"; newest_t="$t"; fi
+            done
+            [ -n "$newest" ] && zips=("$newest")
+          fi
+
+          echo "Zips to process: ${#zips[@]}"
+          for z in "${zips[@]}"; do echo "  - $z"; done
+
+          # ---- process each zip
+          for z in "${zips[@]}"; do
+            case "$z" in */build/*|node_modules/*) echo "Ignoring $z"; continue;; esac
+            [ -f "$z" ] || { echo "Missing $z, skipping"; continue; }
+            echo "=== Processing: $z"
             d=$(mktemp -d)
-            unzip -q -o "$z" -d "$d" -x '__MACOSX/*' '*.DS_Store' || [ $? -eq 11 ] || true
-            while [ "$(ls -A "$d" | wc -l)" = 1 ] && [ -d "$d/$(ls -A "$d")" ] && ! [[ "$(ls -A "$d")" =~ ^(app|gradle)$ ]]; do
-              d="$d/$(ls -A "$d")"
+            rc=0
+            unzip -q -o "$z" -d "$d" -x '__MACOSX/*' '*.DS_Store' || rc=$?
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ] && [ "$rc" -ne 11 ]; then
+              echo "::error::unzip failed for $z (exit $rc)"
+              continue
+            fi
+            # strip wrapper folders (e.g. repo-main/) but never app/ or gradle/
+            while :; do
+              [ "$(ls -A "$d" | wc -l)" = "1" ] || break
+              only="$d/$(ls -A "$d")"
+              [ -d "$only" ] || break
+              case "$(basename "$only")" in app|gradle|.github) break;; esac
+              echo "Entering wrapper folder: $(basename "$only")"
+              d="$only"
             done
             rm -rf "$d/.github"
+            echo "Top level of zip:"; ls -A "$d"
             cp -a "$d"/. .
-            echo "$h" >> .organized-zips
+            git rm -q -f "$z" || rm -f "$z"
           done
 
       - name: Commit and push
@@ -41,6 +81,17 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet && echo "Nothing to commit" && exit 0
+          if git diff --cached --quiet; then
+            echo "Nothing changed - the zip contents are identical to what is already in the repo."
+            exit 0
+          fi
+          echo "Files changed:"
+          git diff --cached --stat | tail -40
           git commit -m "Organize uploaded code"
-          git push
+          for i in 1 2 3; do
+            git pull --rebase origin "${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}" && exit 0
+            echo "Push attempt $i failed, retrying..."
+            sleep 3
+          done
+          echo "::error::Could not push after 3 attempts"
+          exit 1
