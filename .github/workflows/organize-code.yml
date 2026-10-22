@@ -1,12 +1,10 @@
- name: Organize code
+name: Organize code
 
-# Unpacks any .zip you push, copies its contents over the repo (overwriting duplicate files),
-# then deletes the zip. The "Build APK" workflow starts automatically afterwards.
 on:
   push:
     paths:
       - '**.zip'
-  workflow_dispatch:      # manual run: processes the most recently uploaded zip
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -28,7 +26,6 @@ jobs:
           set -uo pipefail
           shopt -s nullglob
 
-          # ---- decide which zips to process
           zips=()
           if [ "${{ github.event_name }}" = "push" ]; then
             before="${{ github.event.before }}"
@@ -49,7 +46,6 @@ jobs:
           echo "Zips to process: ${#zips[@]}"
           for z in "${zips[@]}"; do echo "  - $z"; done
 
-          # ---- process each zip
           for z in "${zips[@]}"; do
             case "$z" in */build/*|node_modules/*) echo "Ignoring $z"; continue;; esac
             [ -f "$z" ] || { echo "Missing $z, skipping"; continue; }
@@ -61,7 +57,6 @@ jobs:
               echo "::error::unzip failed for $z (exit $rc)"
               continue
             fi
-            # strip wrapper folders (e.g. repo-main/) but never app/ or gradle/
             while :; do
               [ "$(ls -A "$d" | wc -l)" = "1" ] || break
               only="$d/$(ls -A "$d")"
