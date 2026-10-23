@@ -108,4 +108,38 @@ jobs:
           cp "$APK" ChessLab.apk
           APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
           CERT=$("$APKSIGNER" verify --print-certs ChessLab.apk | grep 'certificate SHA-256' | head -1)
-          SF=$(unzip -l Chess
+          SF=$(unzip -l ChessLab.apk | grep -c libstockfish.so || true)
+          {
+            echo "### Chess Lab build $((100 + ${{ github.run_number }}))"
+            echo "- Signing key: \`$CERT\` (identical on every build)"
+            echo "- Stockfish libraries in APK: **$SF**"
+            echo "- Unit tests: ${{ steps.tests.outcome }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$SF" = "0" ]; then echo "::warning::APK built WITHOUT Stockfish (see Stockfish build step)"; fi
+
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          name: ChessLab-apk
+          path: ChessLab.apk
+
+      - name: Move the 'latest' tag to this commit
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f latest
+          git push -f origin refs/tags/latest
+
+      - name: Publish release (permanent download link)
+        if: steps.gate.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Chess Lab (build ${{ github.run_number }})
+          body: |
+            Latest signed APK, built from commit ${{ github.sha }}.
+            Install over the previous version - same signing key, higher version code.
+          files: ChessLab.apk
+          make_latest: true
+          fail_on_unmatched_files: true
