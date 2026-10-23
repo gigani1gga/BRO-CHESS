@@ -1,0 +1,111 @@
+name: Build APK
+
+on:
+  push:
+    paths-ignore:
+      - '**.zip'
+      - '**.md'
+      - '.organized-zips'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-build
+  cancel-in-progress: true
+
+env:
+  SF_TAG: sf_17
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Skip if this exact commit is already built
+        id: gate
+        run: |
+          head=$(git rev-parse HEAD)
+          built=$(git ls-remote origin refs/tags/latest | cut -f1)
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ "$head" = "$built" ]; then
+            echo "Commit $head already built - skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-java@v4
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Restore Stockfish cache
+        if: steps.gate.outputs.skip != 'true'
+        id: sfcache
+        uses: actions/cache/restore@v4
+        with:
+          path: app/src/main/jniLibs
+          key: stockfish-${{ env.SF_TAG }}-${{ hashFiles('.github/workflows/android.yml') }}
+
+      - name: Build Stockfish for Android
+        if: steps.gate.outputs.skip != 'true' && steps.sfcache.outputs.cache-hit != 'true'
+        run: |
+          NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_ROOT:-$ANDROID_NDK_HOME}}"
+          echo "Using NDK at $NDK"
+          export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          git clone --depth 1 --branch "$SF_TAG" https://github.com/official-stockfish/Stockfish.git /tmp/sf
+          cd /tmp/sf/src
+          make net || echo "::warning::make net failed; the build step will retry the download"
+
+          build_abi() {
+            make clean >/dev/null 2>&1 || true
+            rm -f stockfish
+            if make -j"$(nproc)" build ARCH="$2" COMP="$4" CXX="$3-clang++"; then
+              mkdir -p "$GITHUB_WORKSPACE/app/src/main/jniLibs/$1"
+              cp stockfish "$GITHUB_WORKSPACE/app/src/main/jniLibs/$1/libstockfish.so"
+              echo "Built Stockfish for $1"
+            else
+              echo "::warning::Stockfish build failed for $1"
+            fi
+          }
+          build_abi arm64-v8a   armv8       aarch64-linux-android26     ndk
+          build_abi armeabi-v7a armv7-neon  armv7a-linux-androideabi26  ndk
+          build_abi x86_64      x86-64      x86_64-linux-android26      clang
+
+      - name: Save Stockfish cache
+        if: steps.gate.outputs.skip != 'true' && steps.sfcache.outputs.cache-hit != 'true' && hashFiles('app/src/main/jniLibs/arm64-v8a/libstockfish.so') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: app/src/main/jniLibs
+          key: stockfish-${{ env.SF_TAG }}-${{ hashFiles('.github/workflows/android.yml') }}
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          gradle-version: '8.9'
+
+      - name: Unit tests
+        if: steps.gate.outputs.skip != 'true'
+        continue-on-error: true
+        id: tests
+        run: gradle --no-daemon --console=plain testDebugUnitTest
+
+      - name: Build signed release APK
+        if: steps.gate.outputs.skip != 'true'
+        run: gradle --no-daemon --console=plain assembleRelease -PversionCode=$((100 + ${{ github.run_number }}))
+
+      - name: Verify signature and Stockfish
+        if: steps.gate.outputs.skip != 'true'
+        id: verify
+        run: |
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          cp "$APK" ChessLab.apk
+          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          CERT=$("$APKSIGNER" verify --print-certs ChessLab.apk | grep 'certificate SHA-256' | head -1)
+          SF=$(unzip -l Chess
