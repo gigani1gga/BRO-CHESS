@@ -32,11 +32,16 @@ android {
     buildTypes {
         debug {
             signingConfig = signingConfigs.getByName("fixed")
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
         release {
             signingConfig = signingConfigs.getByName("fixed")
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            isDebuggable = false
+            isJniDebuggable = false
+            crunchPngs = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -64,9 +69,11 @@ android {
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
 
     packaging {
-        resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
-        // A native Stockfish binary (libstockfish.so) must be extracted to disk so it can be executed.
-        jniLibs { useLegacyPackaging = true }
+        resources {
+            excludes += listOf("/META-INF/{AL2.0,LGPL2.1}", "META-INF/*.kotlin_module")
+        }
+        // Keep the native engine extraction path but let resource optimization do the rest.
+        jniLibs { useLegacyPackaging = false }
     }
 }
 
