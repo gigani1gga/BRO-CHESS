@@ -1,15 +1,14 @@
 name: Organize code
 
-# Unpacks any .zip you push, copies its contents over the repo (overwriting duplicate files),
-# then deletes the zip. The "Build APK" workflow starts automatically afterwards.
 on:
   push:
-    paths:
-      - '**.zip'
-  workflow_dispatch:      # manual run: processes the most recently uploaded zip
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: organize-code
@@ -28,30 +27,19 @@ jobs:
           set -uo pipefail
           shopt -s nullglob
 
-          # ---- decide which zips to process
-          zips=()
-          if [ "${{ github.event_name }}" = "push" ]; then
-            before="${{ github.event.before }}"
-            if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
-              mapfile -t zips < <(git ls-files '*.zip')
-            else
-              mapfile -t zips < <(git diff --name-only --diff-filter=AM "$before" "${{ github.sha }}" -- '*.zip')
-            fi
-          else
-            newest=""; newest_t=0
+          last_org=$(git log -1 --grep='^Organize uploaded code$' --format=%ct 2>/dev/null || true)
+          last_org=${last_org:-0}
+          mapfile -t zips < <(
             for z in *.zip; do
               t=$(git log -1 --format=%ct -- "$z")
-              if [ "${t:-0}" -gt "$newest_t" ]; then newest="$z"; newest_t="$t"; fi
-            done
-            [ -n "$newest" ] && zips=("$newest")
-          fi
+              if [ "${t:-0}" -gt "$last_org" ]; then printf '%s\t%s\n' "$t" "$z"; fi
+            done | sort -n | cut -f2-
+          )
 
           echo "Zips to process: ${#zips[@]}"
           for z in "${zips[@]}"; do echo "  - $z"; done
 
-          # ---- process each zip
           for z in "${zips[@]}"; do
-            case "$z" in */build/*|node_modules/*) echo "Ignoring $z"; continue;; esac
             [ -f "$z" ] || { echo "Missing $z, skipping"; continue; }
             echo "=== Processing: $z"
             d=$(mktemp -d)
@@ -61,7 +49,6 @@ jobs:
               echo "::error::unzip failed for $z (exit $rc)"
               continue
             fi
-            # strip wrapper folders (e.g. repo-main/) but never app/ or gradle/
             while :; do
               [ "$(ls -A "$d" | wc -l)" = "1" ] || break
               only="$d/$(ls -A "$d")"
@@ -76,22 +63,26 @@ jobs:
             git rm -q -f "$z" || rm -f "$z"
           done
 
-      - name: Commit and push
+      - name: Commit, push, start build
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           if git diff --cached --quiet; then
-            echo "Nothing changed - the zip contents are identical to what is already in the repo."
+            echo "Nothing to organize in this push."
             exit 0
           fi
           echo "Files changed:"
           git diff --cached --stat | tail -40
           git commit -m "Organize uploaded code"
+          ok=0
           for i in 1 2 3; do
-            git pull --rebase origin "${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}" && exit 0
+            if git pull --rebase origin "${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}"; then ok=1; break; fi
             echo "Push attempt $i failed, retrying..."
             sleep 3
           done
-          echo "::error::Could not push after 3 attempts"
-          exit 1
+          if [ "$ok" != "1" ]; then echo "::error::Could not push after 3 attempts"; exit 1; fi
+          echo "Starting APK build..."
+          gh workflow run android.yml --ref "${{ github.ref_name }}"
