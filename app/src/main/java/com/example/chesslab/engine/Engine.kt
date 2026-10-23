@@ -287,12 +287,12 @@ class Engine(seed: Long = System.nanoTime()) {
 
     /** 64-bit Zobrist-style key of the current position (pieces, side, castling, en passant file). */
     internal fun hash64(): Long {
-        var h = if (side == 1) 0L else Tables.Z64[832]
-        h = h xor Tables.Z64[833 + cs]
-        if (ep >= 0) h = h xor Tables.Z64[849 + (ep and 7)]
+        var h = if (side == 1) 0L else Zobrist64.K[832]
+        h = h xor Zobrist64.K[833 + cs]
+        if (ep >= 0) h = h xor Zobrist64.K[849 + (ep and 7)]
         for (q in 0 until 64) {
             val p = b[q]
-            if (p != 0) h = h xor Tables.Z64[(p + 6) * 64 + q]
+            if (p != 0) h = h xor Zobrist64.K[(p + 6) * 64 + q]
         }
         return h
     }
