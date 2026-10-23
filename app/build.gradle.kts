@@ -42,13 +42,16 @@ android {
             isShrinkResources = true
             isDebuggable = false
             isJniDebuggable = false
-            crunchPngs = true
 
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
         }
+    }
+
+    androidResources {
+        crunchPngs = true
     }
 
     compileOptions {
