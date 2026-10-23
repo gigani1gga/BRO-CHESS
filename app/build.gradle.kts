@@ -75,12 +75,9 @@ android {
 
     packaging {
         resources {
-            excludes += setOf(
+            excludes += listOf(
                 "/META-INF/{AL2.0,LGPL2.1}",
-                "META-INF/*.kotlin_module",
-                "META-INF/*.version",
-                "META-INF/NOTICE*",
-                "META-INF/LICENSE*"
+                "META-INF/*.kotlin_module"
             )
         }
         jniLibs { useLegacyPackaging = false }
