@@ -76,5 +76,15 @@ fun ArenaScreen(vm: ArenaViewModel, padding: PaddingValues) {
                 StatCard("%,d".format(s.positions), "positions learned from", Modifier.weight(1f))
             }
         }
+        item {
+            Text("Recent games vs Stockfish", style = MaterialTheme.typography.titleMedium)
+            if (s.recentGames.isEmpty()) {
+                Text("No games yet. Start the arena to log training matches.", style = MaterialTheme.typography.bodyMedium)
+            } else {
+                s.recentGames.forEach { game ->
+                    Text(game, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
     }
 }

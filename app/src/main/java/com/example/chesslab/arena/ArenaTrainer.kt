@@ -132,7 +132,10 @@ class ArenaTrainer(
         while (scope.isActive && job?.isActive == true) {
             running.first { it }
             val lvl = level
-            if (lvl != applied) { o.setOption("Skill Level", lvl); applied = lvl }
+            if (lvl != applied) {
+                o.setOption("Skill Level", lvl)
+                applied = lvl
+            }
             o.newGame()
             e.reset()
             brain.setWeights(synchronized(wLock) { w.copyOf() })
@@ -152,8 +155,7 @@ class ArenaTrainer(
                 targets.add(cpTarget)
                 val m = when {
                     ply < 5 -> e.randomLegalMove()
-                    turn == ours ->
-                        if (Math.random() < 0.03) e.randomLegalMove() else brain.best(OUR_MS, OUR_DEPTH).move
+                    turn == ours -> if (Math.random() < 0.05) e.randomLegalMove() else brain.best(OUR_MS, OUR_DEPTH).move
                     else -> fromUci(e, r.bestMove)
                 }
                 if (m < 0) break
@@ -201,7 +203,8 @@ class ArenaTrainer(
             score < 0 -> "Loss"
             else -> "Draw"
         }
-        val text = if (moves.isEmpty()) "" else moves.joinToString(" ") { moveToUci(it) }
+        if (moves.isEmpty()) return "$outcome: opening"
+        val text = moves.joinToString(" ") { moveToUci(it) }
         val compact = if (text.length > 90) text.substring(0, 87) + "..." else text
         return "$outcome: $compact${if (result.isNotEmpty()) " • ${result.trim()}" else ""}"
     }
@@ -209,10 +212,10 @@ class ArenaTrainer(
     private fun moveToUci(move: Int): String {
         val from = move and 63
         val to = (move shr 6) and 63
-        val fromFile = 'a' + (from and 7)
-        val fromRank = '1' + (8 - (from shr 3)) - 1
-        val toFile = 'a' + (to and 7)
-        val toRank = '1' + (8 - (to shr 3)) - 1
+        val fromFile = ('a' + (from and 7))
+        val fromRank = ('8' - (from shr 3))
+        val toFile = ('a' + (to and 7))
+        val toRank = ('8' - (to shr 3))
         val promo = when ((move shr 12) and 7) {
             2 -> "n"
             3 -> "b"
@@ -220,7 +223,7 @@ class ArenaTrainer(
             5 -> "q"
             else -> ""
         }
-        return "${fromFile}${fromRank}${toFile}${toRank}$promo".replace("\n", "")
+        return "$fromFile$fromRank$toFile$toRank$promo"
     }
 
     private fun publish(note: String) {
