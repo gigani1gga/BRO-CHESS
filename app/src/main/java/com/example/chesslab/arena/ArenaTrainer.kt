@@ -207,7 +207,8 @@ class ArenaTrainer(
         if (moves.isEmpty()) return "$outcome: opening"
         val text = moves.joinToString(" ") { moveToUci(it) }
         val compact = if (text.length > 90) text.substring(0, 87) + "..." else text
-        return "$outcome: $compact${if (result.isNotEmpty()) \" • ${result.trim()}\" else \"\"}"
+        val detail = if (result.isNotEmpty()) " • ${result.trim()}" else ""
+        return "$outcome: $compact$detail"
     }
 
     private fun moveToUci(move: Int): String {
