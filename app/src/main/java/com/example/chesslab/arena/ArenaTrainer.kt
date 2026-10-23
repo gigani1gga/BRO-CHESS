@@ -155,7 +155,8 @@ class ArenaTrainer(
                 targets.add(cpTarget)
                 val m = when {
                     ply < 5 -> e.randomLegalMove()
-                    turn == ours -> if (Math.random() < 0.05) e.randomLegalMove() else brain.best(OUR_MS, OUR_DEPTH).move
+                    turn == ours ->
+                        if (Math.random() < 0.05) e.randomLegalMove() else brain.best(OUR_MS, OUR_DEPTH).move
                     else -> fromUci(e, r.bestMove)
                 }
                 if (m < 0) break
@@ -206,7 +207,7 @@ class ArenaTrainer(
         if (moves.isEmpty()) return "$outcome: opening"
         val text = moves.joinToString(" ") { moveToUci(it) }
         val compact = if (text.length > 90) text.substring(0, 87) + "..." else text
-        return "$outcome: $compact${if (result.isNotEmpty()) " • ${result.trim()}" else ""}"
+        return "$outcome: $compact${if (result.isNotEmpty()) \" • ${result.trim()}\" else \"\"}"
     }
 
     private fun moveToUci(move: Int): String {
