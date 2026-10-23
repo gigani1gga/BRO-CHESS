@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.tanh
 
@@ -27,7 +28,8 @@ data class ArenaStats(
     val recent: Double = 0.0,
     val error: Double = 0.0,
     val positions: Long = 0,
-    val note: String = ""
+    val note: String = "",
+    val recentGames: List<String> = emptyList()
 )
 
 /**
@@ -46,6 +48,8 @@ class ArenaTrainer(
     val running = MutableStateFlow(false)
     private val _stats = MutableStateFlow(ArenaStats())
     val stats: StateFlow<ArenaStats> = _stats
+
+    private val recentQueue = ArrayDeque<String>()
 
     @Volatile private var level = 0
     private var games = 0; private var wins = 0; private var draws = 0; private var losses = 0
@@ -84,6 +88,7 @@ class ArenaTrainer(
         synchronized(this) {
             games = 0; wins = 0; draws = 0; losses = 0
             recent = 0.0; err = 0.5; positions = 0; windowSum = 0; windowN = 0
+            recentQueue.clear()
         }
         level = 0
         publish("")
@@ -143,18 +148,21 @@ class ArenaTrainer(
                 running.first { it }
                 val r = o.analyse(e.fen(), MOVE_MS)
                 snaps.add(e.b.copyOf())
-                targets.add(tanh(r.cp / 300.0) * turn)
+                val cpTarget = if (r.cp == 0) 0.0 else tanh(r.cp.toDouble() / 600.0) * turn
+                targets.add(cpTarget)
                 val m = when {
-                    ply < 4 -> e.randomLegalMove()
+                    ply < 5 -> e.randomLegalMove()
                     turn == ours ->
-                        if (Math.random() < 0.04) e.randomLegalMove() else brain.best(OUR_MS, OUR_DEPTH).move
+                        if (Math.random() < 0.03) e.randomLegalMove() else brain.best(OUR_MS, OUR_DEPTH).move
                     else -> fromUci(e, r.bestMove)
                 }
                 if (m < 0) break
+                hist.add(m)
                 e.apply(m)
             }
             val win = if (res.contains("checkmate")) (if (res[0] == 'W') 1 else -1) else 0
-            snaps.add(e.b.copyOf()); targets.add(win.toDouble())
+            snaps.add(e.b.copyOf())
+            targets.add(win.toDouble())
             val n = snaps.size
             val bs = IntArray(n * 64)
             for (i in 0 until n) System.arraycopy(snaps[i], 0, bs, i * 64, 64)
@@ -174,14 +182,63 @@ class ArenaTrainer(
                     windowSum = 0; windowN = 0
                 }
             }
+            rememberGame(hist.toIntArray(), score, res)
             publish("")
         }
     }
 
-    private fun publish(note: String) {
-        synchronized(this) {
-            _stats.value = ArenaStats(games, wins, draws, losses, level, recent, err, positions, note)
+    private fun rememberGame(moves: IntArray, score: Int, result: String) {
+        val summary = buildGameSummary(moves, score, result)
+        synchronized(recentQueue) {
+            recentQueue.addFirst(summary)
+            while (recentQueue.size > 8) recentQueue.removeLast()
         }
+    }
+
+    private fun buildGameSummary(moves: IntArray, score: Int, result: String): String {
+        val outcome = when {
+            score > 0 -> "Win"
+            score < 0 -> "Loss"
+            else -> "Draw"
+        }
+        val text = if (moves.isEmpty()) "" else moves.joinToString(" ") { moveToUci(it) }
+        val compact = if (text.length > 90) text.substring(0, 87) + "..." else text
+        return "$outcome: $compact${if (result.isNotEmpty()) " • ${result.trim()}" else ""}"
+    }
+
+    private fun moveToUci(move: Int): String {
+        val from = move and 63
+        val to = (move shr 6) and 63
+        val fromFile = 'a' + (from and 7)
+        val fromRank = '1' + (8 - (from shr 3)) - 1
+        val toFile = 'a' + (to and 7)
+        val toRank = '1' + (8 - (to shr 3)) - 1
+        val promo = when ((move shr 12) and 7) {
+            2 -> "n"
+            3 -> "b"
+            4 -> "r"
+            5 -> "q"
+            else -> ""
+        }
+        return "${fromFile}${fromRank}${toFile}${toRank}$promo".replace("\n", "")
+    }
+
+    private fun publish(note: String) {
+        val snapshot = synchronized(this) {
+            ArenaStats(
+                games,
+                wins,
+                draws,
+                losses,
+                level,
+                recent,
+                err,
+                positions,
+                note,
+                synchronized(recentQueue) { recentQueue.toList() }
+            )
+        }
+        _stats.value = snapshot
     }
 
     private fun fromUci(e: Engine, mv: String): Int {
@@ -197,9 +254,9 @@ class ArenaTrainer(
 
     private companion object {
         const val MAX_PLY = 160
-        const val MOVE_MS = 30
-        const val OUR_MS = 40L
-        const val OUR_DEPTH = 5
+        const val MOVE_MS = 40
+        const val OUR_MS = 80L
+        const val OUR_DEPTH = 6
         const val LR = 0.003
         const val MAX_FAILURES = 5
     }
