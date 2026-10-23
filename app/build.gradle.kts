@@ -35,6 +35,7 @@ android {
             isMinifyEnabled = false
             isShrinkResources = false
         }
+
         release {
             signingConfig = signingConfigs.getByName("fixed")
             isMinifyEnabled = true
@@ -42,6 +43,7 @@ android {
             isDebuggable = false
             isJniDebuggable = false
             crunchPngs = true
+
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -56,7 +58,11 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
-        freeCompilerArgs += listOf("-Xno-param-assertions", "-Xno-call-assertions", "-Xno-receiver-assertions")
+        freeCompilerArgs += listOf(
+            "-Xno-param-assertions",
+            "-Xno-call-assertions",
+            "-Xno-receiver-assertions"
+        )
     }
 
     lint {
@@ -70,9 +76,11 @@ android {
 
     packaging {
         resources {
-            excludes += listOf("/META-INF/{AL2.0,LGPL2.1}", "META-INF/*.kotlin_module")
+            excludes += listOf(
+                "/META-INF/{AL2.0,LGPL2.1}",
+                "META-INF/*.kotlin_module"
+            )
         }
-        // Keep the native engine extraction path but let resource optimization do the rest.
         jniLibs { useLegacyPackaging = false }
     }
 }
